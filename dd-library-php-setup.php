@@ -13,6 +13,9 @@ const OPT_PHP_BIN = 'php-bin';
 const OPT_TRACER_FILE = 'tracer-file';
 const OPT_TRACER_URL = 'tracer-url';
 const OPT_TRACER_VERSION = 'tracer-version';
+const OPT_APPSEC_FILE = 'appsec-file';
+const OPT_APPSEC_URL = 'appsec-url';
+const OPT_APPSEC_VERSION = 'appsec-version';
 const OPT_UNINSTALL = 'uninstall';
 
 function main()
@@ -47,6 +50,9 @@ Options:
     --tracer-version <0.1.2>    Install a specific version. If set --tracer-url and --tracer-file are ignored.
     --tracer-url <url>          Install the tracing library from a url. If set --tracer-file is ignored.
     --tracer-file <file>        Install the tracing library from a local .tar.gz file.
+    --appsec-version <0.1.0>    Install a specific version of the appsec lib. If set --tracer-url and --tracer-file are ignored.
+    --appsec-url <url>          Install the appsec library from a url. If set --appsec-file is ignored.
+    --appsec-file <file>        Install the appsec library from a local .tar.gz file.
     --install-dir <path>        Install to a specific directory. Default: '/opt/datadog'
     --uninstall                 Uninstall the library from the specified binaries
 
@@ -66,6 +72,28 @@ function install($options)
     $selectedBinaries = require_binaries_or_exit($options);
     $interactive = empty($options[OPT_PHP_BIN]);
 
+    install_tracer($options, $selectedBinaries);
+    install_appsec($options, $selectedBinaries);
+
+    echo "--------------------------------------------------\n";
+    echo "SUCCESS\n\n";
+    if ($interactive) {
+        echo "Run this script in a non interactive mode adding the following 'php-bin' options:\n";
+        $args = array_merge(
+            $_SERVER["argv"],
+            array_map(
+                function ($el) {
+                    return '--php-bin=' . $el;
+                },
+                array_keys($selectedBinaries)
+            )
+        );
+        echo "  php " . implode(" ", array_map("escapeshellarg", $args)) . "\n";
+    }
+}
+
+function install_tracer($options, $selectedBinaries)
+{
     // Preparing clean tmp folder to extract files
     $tmpDir = sys_get_temp_dir() . '/dd-library';
     $tmpDirTarGz = $tmpDir . '/dd-trace-php.tar.gz';
@@ -111,7 +139,7 @@ function install($options)
     // Actual installation
     foreach ($selectedBinaries as $command => $fullPath) {
         $binaryForLog = ($command === $fullPath) ? $fullPath : "$command ($fullPath)";
-        echo "Installing to binary: $binaryForLog\n";
+        echo "Installing tracer to binary: $binaryForLog\n";
         $phpProperties = ini_values($fullPath);
 
         // Copying the extension
@@ -123,7 +151,7 @@ function install($options)
             $extensionSuffix = '-alpine';
         } elseif (is_truthy($phpProperties[IS_DEBUG])) {
             $extensionSuffix = '-debug';
-        } elseif (is_truthy(THREAD_SAFETY)) {
+        } elseif (is_truthy($phpProperties[THREAD_SAFETY])) {
             $extensionSuffix = '-zts';
         }
         $extensionRealPath = $tmpExtensionsDir . '/ddtrace-' . $extensionVersion . $extensionSuffix . '.so';
@@ -140,18 +168,7 @@ function install($options)
 
         // Writing the ini file
         $iniFileName = '98-ddtrace.ini';
-        $iniFilePaths = [$phpProperties[INI_CONF] . '/' . $iniFileName];
-        if (\strpos($phpProperties[INI_CONF], '/cli/conf.d') !== false) {
-            /* debian based distros have INI folders split by SAPI, in a predefined way:
-             *   - <...>/cli/conf.d       <-- we know this from php -i
-             *   - <...>/apache2/conf.d   <-- we derive this from relative path
-             *   - <...>/fpm/conf.d       <-- we derive this from relative path
-             */
-            $apacheConfd = str_replace('/cli/conf.d', '/apache2/conf.d', $phpProperties[INI_CONF]);
-            if (\is_dir($apacheConfd)) {
-                array_push($iniFilePaths, "$apacheConfd/$iniFileName");
-            }
-        }
+        $iniFilePaths = ini_file_paths($phpProperties, $iniFileName);
         foreach ($iniFilePaths as $iniFilePath) {
             if (!file_exists($iniFilePath)) {
                 $iniDir = dirname($iniFilePath);
@@ -189,21 +206,111 @@ function install($options)
             echo "Installation to '$binaryForLog' was successful\n";
         }
     }
+}
 
-    echo "--------------------------------------------------\n";
-    echo "SUCCESS\n\n";
-    if ($interactive) {
-        echo "Run this script in a non interactive mode adding the following 'php-bin' options:\n";
-        $args = array_merge(
-            $_SERVER["argv"],
-            array_map(
-                function ($el) {
-                    return '--php-bin=' . $el;
-                },
-                array_keys($selectedBinaries)
-            )
-        );
-        echo "  php " . implode(" ", array_map("escapeshellarg", $args)) . "\n";
+function install_appsec($options, $selectedBinaries)
+{
+    if (!isset($options[OPT_APPSEC_FILE]) &&
+        !isset($options[OPT_APPSEC_URL]) &&
+        !isset($options[OPT_APPSEC_VERSION])) {
+        return;
+    }
+
+    echo "Installing appsec\n";
+
+    // Preparing clean tmp folder to extract files
+    $tmpDir = sys_get_temp_dir() . '/dd-appsec';
+    $tarball = "$tmpDir/dd-appsec-php.tar.gz";
+    execute_or_exit("Cannot create directory '$tmpDir'",
+        "mkdir -p " . escapeshellarg($tmpDir));
+    execute_or_exit(
+        "Cannot clean '$tmpDir'",
+        "rm -f " . escapeshellarg($tarball)
+    );
+
+    // Retrieve the archive to the temporary location
+    if (isset($options[OPT_APPSEC_FILE])) {
+        $tarball = $options[OPT_APPSEC_FILE];
+    } else {
+        $url = isset($options[OPT_APPSEC_URL])
+            ? $options[OPT_APPSEC_URL]
+            : sprintf('https://github.com/DataDog/dd-appsec-php/releases/' .
+                "download/v%s/dd-appsec-php-%s-amd64.tar.gz",
+                rawurlencode($options[OPT_APPSEC_VERSION]),
+                rawurlencode($options[OPT_APPSEC_VERSION]));
+        download($url, $tarball);
+    }
+
+    $installDir = "{$options[OPT_INSTALL_DIR]}/appsec-" . extract_version_appsec($options, $tarball);
+
+    // copying sources to the final destination
+    execute_or_exit(
+        "Cannot create directory '$installDir'",
+        "mkdir -p " . escapeshellarg($installDir)
+    );
+    execute_or_exit(
+        "Cannot extract files from '$tarball' to directory '$installDir'",
+        'tar --strip-components=1 -C ' . escapeshellarg($installDir) .
+        ' -xf ' . escapeshellarg($tarball)
+    );
+    echo "Installed dd-appsec files to '$installDir'\n";
+
+    // Actual installation
+    foreach ($selectedBinaries as $command => $fullPath) {
+        $binaryForLog = ($command === $fullPath) ? $fullPath : "$command ($fullPath)";
+        echo "Installing appsec to binary: $binaryForLog\n";
+        $phpProperties = ini_values($fullPath);
+
+        if (is_truthy($phpProperties[IS_DEBUG])) {
+            echo "WARNING: Cannot install appsec for $binaryForLog: " .
+                "this is a debug PHP build, which is not supported\n";
+            continue;
+        }
+
+        // Copy ddappsec.so
+        $extensionFilename = 'ddappsec.so';
+        $extensionOrigin = sprintf(
+            "$installDir/lib/php/no-debug-%s-%s/$extensionFilename",
+            is_truthy($phpProperties[THREAD_SAFETY]) ? 'zts' :'non-zts',
+            $phpProperties[PHP_API]);
+
+        if (!file_exists($extensionOrigin)) {
+            echo "WARNING: Cannot install appsec for $binaryForLog: " .
+                "the PHP version is unsupported; no such file '$extensionOrigin'\n";
+            continue;
+        }
+
+        $extensionDestination = "{$phpProperties[EXTENSION_DIR]}/$extensionFilename";
+
+        $tmpExtName = "$extensionDestination.tmp";
+        copy($extensionOrigin, $tmpExtName);
+        rename($tmpExtName, $extensionDestination);
+        echo "Copied '$extensionOrigin' '$extensionDestination'\n";
+
+        // Writing the ini file
+        $iniFileName = '98-ddappsec.ini';
+        $helperPath = "$installDir/bin/ddappsec-helper";
+        $rulesPath = "$installDir/$installDir/bin/ddappsec-helper";
+        $iniContent = get_ini_content_appsec($helperPath, $rulesPath);
+
+        $iniFilePaths = ini_file_paths($phpProperties, $iniFileName);
+        foreach ($iniFilePaths as $iniFilePath) {
+            if (!file_exists($iniFilePath)) {
+                $iniDir = dirname($iniFilePath);
+                execute_or_exit(
+                    "Cannot create directory '$iniDir'",
+                    "mkdir -p " . escapeshellarg($iniDir)
+                );
+
+                if (false === file_put_contents($iniFilePath, $iniContent)) {
+                    print_error_and_exit("Cannot create INI file $iniFilePath");
+                }
+                echo "Created INI file '$iniFilePath'\n";
+            } else {
+                echo "INI file '$iniFilePath' already exists; not touching it\n";
+            }
+            echo "Installation to '$binaryForLog' was successful\n";
+        }
     }
 }
 
@@ -340,6 +447,9 @@ function parse_validate_user_options()
         OPT_TRACER_FILE . ':',
         OPT_TRACER_URL . ':',
         OPT_TRACER_VERSION . ':',
+        OPT_APPSEC_FILE . ':',
+        OPT_APPSEC_URL . ':',
+        OPT_APPSEC_VERSION . ':',
         OPT_INSTALL_DIR . ':',
         OPT_UNINSTALL,
     ];
@@ -362,22 +472,26 @@ function parse_validate_user_options()
                 'One and only one among --tracer-version, --tracer-url and --tracer-file must be provided'
             );
         }
-        if (isset($options[OPT_TRACER_VERSION])) {
-            if (is_array($options[OPT_TRACER_VERSION])) {
-                print_error_and_exit('Only one --tracer-version can be provided');
-            }
-            $normalizedOptions[OPT_TRACER_VERSION] = $options[OPT_TRACER_VERSION];
-        } elseif (isset($options[OPT_TRACER_URL])) {
-            if (is_array($options[OPT_TRACER_URL])) {
-                print_error_and_exit('Only one --tracer-url can be provided');
-            }
-            $normalizedOptions[OPT_TRACER_URL] = $options[OPT_TRACER_URL];
-        } elseif (isset($options[OPT_TRACER_FILE])) {
-            if (is_array($options[OPT_TRACER_FILE])) {
-                print_error_and_exit('Only one --tracer-file can be provided');
-            }
-            $normalizedOptions[OPT_TRACER_FILE] = $options[OPT_TRACER_FILE];
+        $installables = array_intersect([OPT_APPSEC_VERSION, OPT_APPSEC_URL, OPT_APPSEC_FILE], array_keys($options));
+        if (count($installables) > 1) {
+            print_error_and_exit(
+                'One and only one among --appsec-version, --appsec-url and --appsec-file must be provided'
+            );
         }
+        $normalizeSingleOpt = function($opt) use ($options, &$normalizedOptions) {
+            if (isset($options[$opt])) {
+                if (is_array($options[$opt])) {
+                    print_error_and_exit("Only one --$opt can be provided");
+                }
+                $normalizedOptions[$opt] = $options[$opt];
+            }
+        };
+        $normalizeSingleOpt(OPT_TRACER_VERSION);
+        $normalizeSingleOpt(OPT_TRACER_URL);
+        $normalizeSingleOpt(OPT_TRACER_FILE);
+        $normalizeSingleOpt(OPT_APPSEC_VERSION);
+        $normalizeSingleOpt(OPT_APPSEC_URL);
+        $normalizeSingleOpt(OPT_APPSEC_FILE);
     }
 
     if (isset($options[OPT_PHP_BIN])) {
@@ -450,6 +564,23 @@ function extract_version_subdir_path($options, $extractArchiveRoot, $extractedSo
     return date("Y.m.d-H.i");
 }
 
+function extract_version_appsec($options, $tarball)
+{
+    if (isset($options[OPT_APPSEC_VERSION])) {
+        return trim($options[OPT_APPSEC_VERSION]);
+    }
+
+    execute_or_exit("Cannot extract dd-appsec-php/VERSION from $tarball " .
+        "(not a valid dd-appsec-php bundle)",
+        "tar -O -xf " . escapeshellarg($tarball) . " dd-appsec-php/VERSION",
+        $output);
+    $version = reset($output);
+    if ($version === false) {
+        print_error_and_exit("Archive $tarball has an invalid dd-appsec-php/VERSION file");
+    }
+    return $version;
+}
+
 /**
  * Given a certain set of available PHP binaries, let users pick in an interactive way the ones where the library
  * should be installed to.
@@ -492,7 +623,7 @@ function pick_binaries_interactive(array $php_binaries)
     return $pickedBinaries;
 }
 
-function execute_or_exit($exitMessage, $command)
+function execute_or_exit($exitMessage, $command, &$output = array())
 {
     $output = [];
     $returnCode = 0;
@@ -559,7 +690,7 @@ function download($url, $destination)
     if (false !== exec('curl --version', $output, $statusCode) && $statusCode === 0) {
         $curlInvocationStatusCode = 0;
         system(
-            'curl -L --output ' . escapeshellarg($destination) . ' ' . escapeshellarg($url),
+            'curl -Lf --output ' . escapeshellarg($destination) . ' ' . escapeshellarg($url),
             $curlInvocationStatusCode
         );
 
@@ -751,6 +882,39 @@ function build_known_command_names_matrix()
     return array_unique($results);
 }
 
+function ini_file_paths($phpProperties, $iniFileName)
+{
+    $iniDir = $phpProperties[INI_CONF];
+    if ($iniDir == '(none)') {
+        print_error_and_exit(
+            "This PHP installation does not have an ini configuration directory set. " .
+            "Either it has single php.ini file set or none at all; in any case, such setup " .
+            "is unsupported.\nHint: Set env var PHP_INI_SCAN_DIR to the desired directory");
+    }
+    $posComma = strpos($iniDir, ':');
+    if ($posComma !== false) {
+        $iniDir = substr($iniDir, 0, $posComma);
+        echo "More than one ini directory found. Taking the first: $iniDir";
+    }
+    $iniFilePaths = [$iniDir . '/' . $iniFileName];
+    if (\strpos($iniDir, '/cli/conf.d') !== false) {
+        /* debian based distros have INI folders split by SAPI, in a predefined way:
+         *   - <...>/cli/conf.d       <-- we know this from php -i
+         *   - <...>/apache2/conf.d   <-- we derive this from relative path
+         *   - <...>/fpm/conf.d       <-- we derive this from relative path
+         */
+        $apacheConfd = str_replace('/cli/conf.d', '/apache2/conf.d', $iniDir);
+        if (\is_dir($apacheConfd)) {
+            array_push($iniFilePaths, "$apacheConfd/$iniFileName");
+        }
+        $fpmConfd = str_replace('/cli/conf.d', '/fpm/conf.d', $iniDir);
+        if (\is_dir($fpmConfd)) {
+            array_push($iniFilePaths, "$fpmConfd/$iniFileName");
+        }
+    }
+    return $iniFilePaths;
+}
+
 function get_ini_template($requestInitHookPath)
 {
     // phpcs:disable Generic.Files.LineLength.TooLong
@@ -880,6 +1044,85 @@ datadog.trace.request_init_hook = $requestInitHookPath
 ; setcap utility.
 ;datadog.trace.retain_thread_capabilities = Off
 
+EOD;
+    // phpcs:enable Generic.Files.LineLength.TooLong
+}
+
+function get_ini_content_appsec($helperPath, $rulesPath)
+{
+    // phpcs:disable Generic.Files.LineLength.TooLong
+    return <<<EOD
+; Loads the dd-appsec extension
+extension = ddappsec.so
+
+; Enables or disables the loaded dd-appsec extension.
+; If disabled, the extension will do no work during the requests.
+; If no value is set for this setting, then the extension is enabled
+; if and only if the environment variable DD_APPSEC_ENABLED is defined with the
+; value 'true', 'yes', '1', or 'on' (case insensitive).
+; This value is ignored on the CLI SAPI, see ddappsec.enabled_on_cli.
+;ddappsec.enabled =
+
+; Enables or disables the loaded dd-appsec extension for the CLI SAPI.
+; This value is only used for the CLI SAPI, see ddappsec.enabled for the
+; corresponding setting on other SAPIs.
+;ddappsec.enabled_on_cli = Off
+
+; Allows dd-appsec to block attacks by committing an error page response (if no
+; response has already been committed), and issuing an error that cannot be
+; handled, thereby aborting the request.
+;ddappsec.block = On
+
+; Sets the verbosity of the logs of the dd-appsec extension.
+; The valid values are 'off', 'error', 'fatal', 'warn' (or 'warning'), 'info',
+; 'debug' and 'trace', in increasing order of verbosity.
+;ddappsec.log_level = 'warn'
+
+; The destination of the log messages. Valid values are 'php_error_reporting'
+; (issues PHP notices or warnings), 'syslog', 'stdout', 'stderr', or an
+; arbitrary file name to which the messages will be appended.
+;ddappsec.log_file = php_error_reporting
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Messages related to the helper ;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+; The dd-appsec extension communicates with a helper process via UNIX sockets.
+; This setting determines whether the extension should try to launch the daemon
+; in case it cannot obtain a connection.
+; If this is disabled, the helper should be launched through some other method.
+; The extension expects the helper to run under the same user as the process
+; where PHP is running.
+;ddappsec.helper_launch = On
+
+; If ddappsec.helper_launch is enabled, this setting determines which binary
+; the extension should try to execute.
+; Only relevant if ddappsec.helper_launch is enabled.
+ddappsec.helper_path = '$helperPath'
+
+; Additional arguments that should be used when attempting to launch the helper
+; process. The extension always passes '--lock_path - --socket_path fd:<int>'
+; The arguments should be space separated. Both single and double quotes can
+; be used should an argument contain spaces. The backslash (\) can be used to
+; escape spaces, quotes, and the blackslash itself.
+; Only relevant if ddappsec.helper_launch is enabled.
+ddappsec.helper_extra_args = "--waf_rule_path '$rulesPath'"
+
+; The location to the UNIX socket that extension uses to communicate with the
+; helper.
+;ddappsec.helper_socket_path = /tmp/ddappsec.sock
+
+; The location of the lock file that the extension processes will use to
+; synchronize the launching of the helper.
+; Only relevant if ddappsec.helper_launch is enabled.
+;ddappsec.helper_lock_path = /tmp/ddappsec.lock
+
+; The location of the log file of the helper. This default to /dev/null (the log
+; messages will be discarded. This file is opened by the extension just before
+; launching the daemon and the file descriptor is passed to the helper as its
+; stderr, to which it will write its messages; this setting is therefore only
+; relevant if ddappsec.helper_launch is enabled.
+;ddappsec.helper_log_file = /dev/null
 EOD;
     // phpcs:enable Generic.Files.LineLength.TooLong
 }
